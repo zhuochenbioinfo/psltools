@@ -4,6 +4,7 @@ use warnings;
 my($psl,$outfile) = @ARGV;
 
 my $usage = "USAGE:\nperl $0 <psl file> <output file>\n";
+$usage .= "Test for github.\n";
 
 die $usage unless(@ARGV == 2);
 
