@@ -4,6 +4,7 @@ use warnings;
 my($psl,$outfile) = @ARGV;
 
 my $usage = "USAGE:\nperl $0 <psl file> <output file>\n";
+$usage .= "Calculate the coverage of the query by the target.\n";
 
 die $usage unless(@ARGV == 2);
 
