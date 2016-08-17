@@ -1,4 +1,3 @@
-# For spliced genome assembly
 #########################################################
 #	extract_variants_from_psl.pl
 #	
@@ -8,33 +7,38 @@
 #	By Zhuo CHEN, IGDB, CAS
 #	zhuochen@genetics.ac.cn
 #	zhuochenbioinfo@gamil.com
-#
-#	Version 1.0 at 2016.03.07
 #	
 #########################################################
 
-=note
+=anno
 The first time I started my work on using BLAT to find variants in genes from assembly results, I aligned the reference sequences of the genes to the whole genome assembled contigs with BLAT.
 So the former versions of program (psl2vcf.pl) to extract variants from BLAT results used the reference sequence (where you anchor the variants) as query sequence and the contigs as the target (or database).
 But things have changed now when I need to find variants from a local assembly result against the reference chromosome, BLAT takes too long when using the large chromosome file as the query.
-Here is a new program using the reference sequence as target (or database) and contigs as query.
+So here is a new program using the reference sequence as target (or database) and contigs as query.
 =cut
 
 use strict;
 use warnings;
 use Getopt::Long;
 
-my($psl,$qref,$tref,$outname);
-my $usage = "USAGE:\nperl $0 --psl <psl file> --qref <query refence seq> --tref <target reference seq> --out <outname>\n";
+my($psl,$qref,$tref,$outname,$gapmax);
+my $usage = "USAGE:\nperl $0 --psl <psl file> --qref <query refence seq> --tref <target reference seq> --out <outname> --maxgap <ma gap size>\n";
+$usage .= "--maxgap set the max gap size to call from the psl. Default=100\n";
+
 GetOptions(
 	"psl=s" => \$psl,
 	"qref=s" => \$qref,
 	"tref=s" => \$tref,
 	"out=s" => \$outname,
+	"maxgap=s" => \$gapmax,
 ) or die $usage;
 
 unless(defined $psl and defined $qref and defined $tref and defined $outname){
 	die $usage;
+}
+
+unless(defined $gapmax){
+	$gapmax = 100;
 }
 
 # ---------------------- PART I: Reading the reference sequences -----------------------
@@ -101,7 +105,7 @@ open(PSL,"<$psl") or die "$!";
 my $tname_tmp = "";
 my @covered_regions;
 my %hash_vcf;
-open(UNC,">unused.list");
+my %hash_ctgs;
 
 while(<PSL>){
 	chomp;
@@ -110,22 +114,32 @@ while(<PSL>){
 	my($match,$mismatch,undef,undef,undef,undef,undef,undef,$strand,
 	$qname,$qsize,$qstart,$qend,$tname,$tsize,$tstart,$tend,
 	$blknum,$blocksizes,$qbstarts,$tbstarts,$flanks) = split/\t/,$inline;
-	my $uncovered = 0;
-	#my($flankup,$flankdown) = split/,/,$flanks;
 	
-	if($tname ne $tname_tmp){
-		@covered_regions = ();
-		$tname_tmp = $tname;
-	}
-	$hash_pslcount{$tname}++;
-	
-	for(my $i=$tstart+1;$i<=$tend;$i++){
-		$hash_cov{$tname}{$i}{relative}++;
-	}
+	next if(exists $hash_ctgs{$qname});
+	$hash_ctgs{$qname}{match} = $match;
 	
 	my @qbs = split/,/,$qbstarts;
 	my @tbs = split/,/,$tbstarts;
 	my @blks = split/,/,$blocksizes;
+	
+	#my($flankup,$flankdown) = split/,/,$flanks;
+	
+	$hash_pslcount{$tname}++;
+	
+	# set absolute cover
+	for(my $count = 0; $count < $blknum; $count++){
+		for(my $i=$tbs[$count]+1;$i<=$tbs[$count]+$blks[$count];$i++){
+			my $tpos =  $i;
+			#next if(exists $hash_cov{$tname}{$tpos}{final});
+			$hash_cov{$tname}{$i}{absolute}++; 
+		}
+	}
+	
+	# set relative cover
+	for(my $i=$tstart+1;$i<=$tend;$i++){
+		#next if(exists $hash_cov{$tname}{$i}{final});
+		$hash_cov{$tname}{$i}{relative}++;
+	}
 	
 	for(my $count = 0; $count < $blknum; $count++){
 		
@@ -137,43 +151,29 @@ while(<PSL>){
 			$qseq = substr($hash_qref{$qname}{revcom},$qbs[$count],$blks[$count]);
 		}
 		
-		#coverage count
-		for(my $i=$tbs[$count]+1;$i<=$tbs[$count]+$blks[$count];$i++){
-			my $tpos =  $i;
-			# Optional: ignore overlap region.
-			foreach my $region (@covered_regions){
-				my($rstart,$rend) = split/,/,$region;
-				if($tpos > $rstart and $tpos <= $rend){
-					goto THROW1;
-				}
-			}
-			# Optional: ignore overlap region.
-			$hash_cov{$tname}{$i}{absolute}++; 
-			THROW1:
-		}
-		
 		#dealing with mismatches -> snps
 		for(my $i=0;$i<$blks[$count];$i++){
 			my $qbase = substr($qseq,$i,1);
 			my $tbase = substr($tseq,$i,1);
 			my $tpos = $tbs[$count] + 1 + $i;
 			
-			
-			# Optional: ignore overlap region.
-			my $covered = 0;
-			foreach my $region (@covered_regions){
-				my($rstart,$rend) = split/,/,$region;
-				if($tpos > $rstart and $tpos <= $rend){
-					$covered = 1;
+			#next if(exists $hash_cov{$tname}{$tpos}{final});
+			if(exists $hash_vcf{$tname}{$tpos}{REF}){
+				my $base = $hash_vcf{$tname}{$tpos}{REF}{base};
+				if($tbase ne $base){
+					die "# ERROR: multiple tbase type at ref:$tname pos:$tpos\n";
 				}
 			}
-			next if($covered == 1);
-			# Optional: ignore overlap region.
-			$uncovered++;
+			$hash_vcf{$tname}{$tpos}{REF}{base} = $tbase;
 			
 			if($qbase ne $tbase){
-				$hash_vcf{$tname}{$tpos}{REF} = $tbase; 
-				$hash_vcf{$tname}{$tpos}{ALT} = $qbase; 
+				#$hash_vcf{$tname}{$tpos}{ALT} = $qbase; 
+				$hash_vcf{$tname}{$tpos}{SNP}{$qbase}{CTG}{$qname} = "";
+			}else{
+				# ref type contig
+				$hash_vcf{$tname}{$tpos}{REF}{CTG}{$qname} = "";
+				# ref type contig with out gap
+				$hash_vcf{$tname}{$tpos}{REF}{GCTG}{$qname} = "";
 			}
 =cu
 			# find putative indel by flanking region:
@@ -206,22 +206,37 @@ while(<PSL>){
 			my $qgapstart = $qbs[$count] + $blks[$count] + 1;
 			my $qgapend = $qbs[$count + 1];
 			
+			my $tgaplen = $tgapend - $tgapstart + 1;
+			my $qgaplen = $qgapend - $qgapstart + 1;
+			
 			my $tpos = $tbs[$count] + $blks[$count];
 			
-			# Optional: ignore overlap region.
-			foreach my $region(@covered_regions){
-				my($rstart,$rend) = split/,/,$region;
-				if(($tgapstart > $rstart and $tgapstart <= $rend)
-					or ($tgapend > $rstart and $tgapend <= $rend)
-					or ($tgapstart <= $rstart and $tgapend > $rend)
-					or (exists $hash_vcf{$tname}{$tpos})){
-					for(my $i = $tgapstart; $i <= $tgapend; $i++){
-						$hash_cov{$tname}{$i}{relative}--;
+			
+			# Set the conditions the abandon a gap
+			my $throwgap = 0;
+			if($tgaplen > $match or $qgaplen > $match or $tgaplen > $gapmax or $qgaplen > $gapmax){
+				$throwgap = 1;
+			}
+=cu
+			if(exists $hash_cov{$tname}{$tgapstart - 1}{final}){
+				$throwgap = 1;
+			}else{
+				for(my $i = $tgapstart; $i <= $tgapend; $i++){
+					if(exists $hash_cov{$tname}{$i}{final}){
+						$throwgap = 1;
+						last;
 					}
-					goto THROW2;
 				}
 			}
-			# Optional: ignore overlap region.
+=cut
+			if($throwgap == 1){
+				for(my $i = $tgapstart; $i <= $tgapend; $i++){
+					#unless(exists $hash_cov{$tname}{$i}{final}){
+						$hash_cov{$tname}{$i}{relative} --;
+					#}
+				}
+				goto THROW2;
+			}
 			
 			# get the last bases of the q and t block 
 			my $qgap = substr($qseq,$blks[$count]-1,1);
@@ -229,8 +244,8 @@ while(<PSL>){
 			
 			# check if the last bases are identical; if not, 
 			if($qgap ne $tgap){
-				delete($hash_vcf{$tname}{$tpos});
-				$hash_cov{$tname}{$tpos}{absolute} --; 
+				delete($hash_vcf{$tname}{$tpos}{SNP}{$qgap}{CTG}{$qname});
+				$hash_cov{$tname}{$tpos}{absolute} --;
 				$blks[$count]--;
 				goto WRONG_BLOCK_END;
 			}
@@ -246,25 +261,33 @@ while(<PSL>){
 			}
 			$qgap .= $qgapbases;
 			
-			$hash_vcf{$tname}{$tpos}{REF} = $tgap;
-			$hash_vcf{$tname}{$tpos}{ALT} = $qgap;
+			delete($hash_vcf{$tname}{$tpos}{REF}{GCTG}{$qname});
+			$hash_vcf{$tname}{$tpos}{INDEL}{REF}{$tgap}{ALT}{$qgap}{CTG}{$qname} = "";
 		}
 		THROW2:
 		
 	}
-	if($uncovered == 0){
-		print UNC "$qname\n";
+	
+	# set final cover
+	for(my $i=$tstart+1;$i<=$tend;$i++){
+		$hash_cov{$tname}{$i}{final} = 1;
 	}
-	push @covered_regions,"$tstart,$tend";
 }
 close PSL;
 print "Done!\n";
 # --------------------- PART II END -----------------------
 
-open(COV,">$outname.coverage");
-print COV "chr\tposition\tdepth_absolute\tdepth_relative\n";
+open(COV,">$outname.covab");
+print COV "#CHROM\tTYPE\tSTART\tEND\n";
+open(RCOV,">$outname.covre");
+print RCOV "#CHROM\tTYPE\tSTART\tEND\n";
 
 foreach my $tname (keys %hash_cov){
+	my $gapstart = "";
+	my $covstart = "";
+	my $gapstart_re = "";
+	my $covstart_re = "";
+	my $endpos = "";
 	foreach my $pos (sort{$a<=>$b} keys %{$hash_cov{$tname}}){
 		unless(exists $hash_cov{$tname}{$pos}{absolute}){
 			print "$tname\t$pos\tno absolute\n";
@@ -274,17 +297,152 @@ foreach my $tname (keys %hash_cov){
 				die;
 			}
 		}
-		print COV "$tname\t$pos\t$hash_cov{$tname}{$pos}{absolute}\t$hash_cov{$tname}{$pos}{relative}\n";
+		my $depth = $hash_cov{$tname}{$pos}{absolute};
+		my $depth_re = $hash_cov{$tname}{$pos}{relative};
+		
+		if($depth == 0){
+			if($gapstart eq "" and $covstart eq ""){
+				$gapstart = $pos;
+			}elsif($gapstart eq ""){
+				$gapstart = $pos;
+				my $covend = $pos - 1;
+				print COV "$tname\tcov\t$covstart\t$covend\n";
+				$covstart = "";
+			}
+		}else{
+			if($gapstart eq "" and $covstart eq ""){
+				$covstart = $pos;
+			}elsif($covstart eq ""){
+				$covstart = $pos;
+				my $gapend = $pos - 1;
+				print COV "$tname\tgap\t$gapstart\t$gapend\n";
+				$gapstart = "";
+			}
+		}
+		
+		if($depth_re == 0){
+			if($gapstart_re eq "" and $covstart_re eq ""){
+				$gapstart_re = $pos;
+			}elsif($gapstart_re eq ""){
+				$gapstart_re = $pos;
+				my $covend_re = $pos - 1;
+				print RCOV "$tname\tcov\t$covstart_re\t$covend_re\n";
+				$covstart_re = "";
+			}
+		}else{
+			if($gapstart_re eq "" and $covstart_re eq ""){
+				$covstart_re = $pos;
+			}elsif($covstart_re eq ""){
+				$covstart_re = $pos;
+				my $gapend_re = $pos - 1;
+				print RCOV "$tname\tgap\t$gapstart_re\t$gapend_re\n";
+				$gapstart_re = "";
+			}
+		}
+		
+		$endpos = $pos;
+		#print COV "$tname\t$pos\t$hash_cov{$tname}{$pos}{absolute}\t$hash_cov{$tname}{$pos}{relative}\n";
+	}
+	if($gapstart eq "" and $covstart eq ""){
+		print STDERR "# ERROR: both gapstart and covstart are empty at the end of chr:$tname\n";
+	}elsif($gapstart eq ""){
+		print COV "$tname\tcov\t$covstart\t$endpos\n";
+	}else{
+		print COV "$tname\tgap\t$gapstart\t$endpos\n";
+	}
+	
+	if($gapstart_re eq "" and $covstart_re eq ""){
+		print STDERR "# ERROR: both gapstart_re and covstart_re are empty at the end of chr:$tname\n";
+	}elsif($gapstart_re eq ""){
+		print RCOV "$tname\tcov\t$covstart_re\t$endpos\n";
+	}else{
+		print RCOV "$tname\tgap\t$gapstart_re\t$endpos\n";
 	}
 }
 close COV;
+close RCOV;
 
 open(VCF,">$outname.vcf");
-print VCF "#CHROM\tPOS\tREF\tALT\n";
+print VCF "#CHROM\tPOS\tTYPE\tREF\tALT\tREFLEN\tALTLEN\tALTCTG\n";
 foreach my $tname (keys %hash_vcf){
 	foreach my $tpos (sort{$a<=>$b} keys %{$hash_vcf{$tname}}){
-		my $qbase = $hash_vcf{$tname}{$tpos}{ALT};
-		print VCF "$tname\t$tpos\t$hash_vcf{$tname}{$tpos}{REF}\t$qbase\n"; #20150318
+		if(exists $hash_vcf{$tname}{$tpos}{SNP}){
+			my $refbase = $hash_vcf{$tname}{$tpos}{REF}{base};
+			my $reflen = "-";
+			
+			if(exists $hash_vcf{$tname}{$tpos}{REF}{CTG}){
+				foreach my $contig(keys %{$hash_vcf{$tname}{$tpos}{REF}{CTG}}){
+					my $match = $hash_ctgs{$contig}{match};
+					if($reflen ne "-"){
+						next unless($match > $reflen);
+					}
+					$reflen = $match;
+				}
+			}
+			
+			foreach my $altbase(keys %{$hash_vcf{$tname}{$tpos}{SNP}}){
+				foreach my $contig(keys %{$hash_vcf{$tname}{$tpos}{SNP}{$altbase}{CTG}}){
+					my $match = $hash_ctgs{$contig}{match};
+					if(exists $hash_vcf{$tname}{$tpos}{SNP}{$altbase}{MLEN}){
+						my $mlen = $hash_vcf{$tname}{$tpos}{SNP}{$altbase}{MLEN};
+						next unless($match > $mlen);
+					}
+					$hash_vcf{$tname}{$tpos}{SNP}{$altbase}{MLEN} = $match;
+					$hash_vcf{$tname}{$tpos}{SNP}{$altbase}{LCTG} = $contig;
+				}
+				unless(exists $hash_vcf{$tname}{$tpos}{SNP}{$altbase}{LCTG}){
+					delete($hash_vcf{$tname}{$tpos}{SNP}{$altbase});
+				}
+			}
+
+			my @altbases = sort {$hash_vcf{$tname}{$tpos}{SNP}{$b}{MLEN} <=> $hash_vcf{$tname}{$tpos}{SNP}{$a}{MLEN}} keys %{$hash_vcf{$tname}{$tpos}{SNP}};
+			next if(@altbases == 0);
+			my @altlens = ();
+			my @altctgs = ();
+			foreach my $altbase(@altbases){
+				my $mlen = $hash_vcf{$tname}{$tpos}{SNP}{$altbase}{MLEN};
+				my $contig = $hash_vcf{$tname}{$tpos}{SNP}{$altbase}{LCTG};
+				push @altlens, $mlen;
+				push @altctgs, $contig;
+			}
+			print VCF "$tname\t$tpos\tSNP\t$refbase\t".join(",",@altbases)."\t$reflen\t".join(",",@altlens)."\t".join(",",@altctgs)."\n";
+		}
+		next unless(exists $hash_vcf{$tname}{$tpos}{INDEL});
+		
+		my $reflen = "-";
+		if(exists $hash_vcf{$tname}{$tpos}{REF}{GCTG}){
+			foreach my $contig(keys %{$hash_vcf{$tname}{$tpos}{REF}{GCTG}}){
+				my $match = $hash_ctgs{$contig}{match};
+				if($reflen ne "-"){
+					next unless($match > $reflen);
+				}
+				$reflen = $match;
+			}
+		}
+		foreach my $tgap(keys %{$hash_vcf{$tname}{$tpos}{INDEL}{REF}}){
+			foreach my $qgap(keys %{$hash_vcf{$tname}{$tpos}{INDEL}{REF}{$tgap}{ALT}}){
+				foreach my $contig(keys %{$hash_vcf{$tname}{$tpos}{INDEL}{REF}{$tgap}{ALT}{$qgap}{CTG}}){
+					my $match = $hash_ctgs{$contig}{match};
+					if(exists $hash_vcf{$tname}{$tpos}{INDEL}{REF}{$tgap}{ALT}{$qgap}{MLEN}){
+						my $mlen = $hash_vcf{$tname}{$tpos}{INDEL}{REF}{$tgap}{ALT}{$qgap}{MLEN};
+						next unless($match > $mlen);
+					}
+					$hash_vcf{$tname}{$tpos}{INDEL}{REF}{$tgap}{ALT}{$qgap}{MLEN} = $match;
+					$hash_vcf{$tname}{$tpos}{INDEL}{REF}{$tgap}{ALT}{$qgap}{LCTG} = $contig;
+				}
+			}
+			
+			my @qgaps = sort {$hash_vcf{$tname}{$tpos}{INDEL}{REF}{$tgap}{ALT}{$b}{MLEN} <=> $hash_vcf{$tname}{$tpos}{INDEL}{REF}{$tgap}{ALT}{$a}{MLEN}} keys %{$hash_vcf{$tname}{$tpos}{INDEL}{REF}{$tgap}{ALT}};
+			my @altlens = ();
+			my @altctgs = ();
+			foreach my $qgap(@qgaps){
+				my $mlen = $hash_vcf{$tname}{$tpos}{INDEL}{REF}{$tgap}{ALT}{$qgap}{MLEN};
+				my $contig = $hash_vcf{$tname}{$tpos}{INDEL}{REF}{$tgap}{ALT}{$qgap}{LCTG};
+				push @altlens, $mlen;
+				push @altctgs, $contig;
+			}
+			print VCF "$tname\t$tpos\tInDel\t$tgap\t".join(",",@qgaps)."\t$reflen\t".join(",",@altlens)."\t".join(",",@altctgs)."\n";
+		}
 	}
 }
 close VCF;
