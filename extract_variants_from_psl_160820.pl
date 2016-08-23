@@ -23,14 +23,15 @@ use strict;
 use warnings;
 use Getopt::Long;
 
-my($psl,$qref,$tref,$outname,$maxgapsize);
+my($psl,$qref,$tref,$outname,$maxgapsize,$q2bit,$t2bit);
 my $usage = "USAGE:\nperl $0 --psl <psl file> --qref <query refence seq> --tref <target reference seq> --out <outname> --maxgap <max gap size>\n";
 $usage .= "<psl file> is the BLAT output file. Better filtered and sorted by match length or other requirements.\n";
 $usage .= "<qref> the query fasta file.\n";
 $usage .= "<tref> the target fasta file.\n";
-$usage .= "<outname> the prefix of the output files. There will be three output files named as <outname>.var <outname>.covab and <outname>.covre\n";
+$usage .= "<outname> the prefix of the output files. There will be three output files named as <outname>.var <outname>.block and <outname>.gap\n";
 $usage .= "<max gap size> is the up limit of the gap size to be retained in the output.\n";
-
+$usage .= "--q2b <query 2bit list>: the 2bit list for query fasta.\n";
+$usage .= "--t2b <target 2bit list>: the 2bit list for target fasta.\n";
 
 GetOptions(
 	"psl=s" => \$psl,
@@ -38,6 +39,8 @@ GetOptions(
 	"tref=s" => \$tref,
 	"out=s" => \$outname,
 	"maxgap=s" => \$maxgapsize,
+	"q2b=s" => \$q2bit,
+	"t2b=s" => \$t2bit,
 ) or die $usage;
 
 unless(defined $psl and defined $qref and defined $tref and defined $outname){
@@ -53,6 +56,31 @@ unless(defined $maxgapsize){
 my %hash_qref;
 my %hash_tref;
 
+my $qrefcount = 0;
+my $trefcount = 0;
+
+if(defined $q2bit){
+	open(IN,"<$q2bit") or die $!;
+	while(<IN>){
+		chomp;
+		my($twobit,$chr,$others) = split/\:/;
+		$hash_qref{$chr}{twobit} = "";
+	}
+	close IN;
+	$qrefcount = keys %hash_qref;
+}
+if(defined $t2bit){
+	open(IN,"<$t2bit") or die $!;
+	while(<IN>){
+		chomp;
+		my($twobit,$chr,$others) = split/\:/;
+		$hash_tref{$chr}{twobit} = "";
+	}
+	close IN;
+	$trefcount = keys %hash_tref;
+}
+
+
 print "Reading query reference...\n";
 open(QREF,"<$qref") or die "$!";
 local $/ = "\n>";
@@ -61,6 +89,14 @@ while(<QREF>){
 	chomp;
 	my($head,$seq) = split/\n/,$_,2;
 	my($seqname) = $head =~ /^(\S+)/;
+	if(defined $q2bit){
+		last if($qrefcount == 0);
+		unless(exists $hash_qref{$seqname}){
+			next;
+		}else{
+			$qrefcount--;
+		}
+	}
 	$seq =~ s/\s+//g;
 	$seq = uc($seq);
 	
@@ -87,6 +123,14 @@ while(<TREF>){
 	chomp;
 	my($head,$seq) = split/\n/,$_,2;
 	my($seqname) = $head =~ /^(\S+)/;
+	if(defined $t2bit){
+		last if($trefcount == 0);
+		unless(exists $hash_tref{$seqname}){
+			next;
+		}else{
+			$trefcount--;
+		}
+	}
 	$seq =~ s/\s+//g;
 	$seq = uc($seq);
 	$hash_tref{$seqname}{seq} = $seq;
@@ -134,22 +178,27 @@ while(<PSL>){
 	# set block cover
 	# block region are covered both absolutely and relatively
 	for(my $count = 0; $count < $blknum; $count++){
+		# The gap and block start of block is 1-based
 		my $tbstart = $tbs[$count] + 1;
 		my $tbend = $tbs[$count] + $blks[$count];
-		$hash_query{$qname}{covab}{$tbstart} = $tbend;
-		$hash_query{$qname}{covre}{$tbstart} = $tbend;
+		$hash_query{$qname}{block}{$tbstart} = $tbend;
 	}
 	
 	# set gap cover
 	# gap region are covered only relatively
 	# gap number is one less than block number
+	# the start pos of gap and block are both 1-based, there may be gaps with size equals 0, when gapend - gaptart + 1 = 0
 	for(my $count = 0; $count < $blknum - 1; $count++){
+		# important change here! 20160823
 		my $tgapstart = $tbs[$count] + $blks[$count] + 1;
 		my $tgapend = $tbs[$count+1];
-		$hash_query{$qname}{covre}{$tgapstart} = $tgapend;
+		# gapend may be smaller than gapstart when an insertion occurs
+		# query  ATGTACTCGTTCCAGAT
+		# target ATGTAC-----CCAGAT
+		$hash_query{$qname}{gap}{$tgapstart} = $tgapend;
 	}
 	
-	# Mind that the cover and covab border may change if there are blocks with wrong end base
+	# Mind that the cover and block border may change if there are blocks with wrong end base
 	# which means the last bases of qblock and tblock are not the same
 	
 	for(my $count = 0; $count < $blknum; $count++){
@@ -171,24 +220,38 @@ while(<PSL>){
 			my $tpos = $tbs[$count] + 1 + $i;
 			
 			if($qbase ne $tbase){
-				# if the last bases of the two blocks are not the same, change the covre and covab border
+				# if the last bases of the two blocks are not the same, change the block and gap border
 				if($i == $blks[$count]-1){
-					print "# WRONG BLOCK END at query:$qname target:$tname blocknum:$count\n";
-					$hash_query{$qname}{covab}{$tbs[$count]+1}--;
-					$hash_query{$qname}{covre}{$tbs[$count]+1}--;
+					print "# WRONG BLOCK END at query:$qname target:$tname blocknum:$count pos:$tpos\n";
+					if(exists $hash_var{$tname}{$tpos}){
+						if(exists $hash_var{$tname}{$tpos}{SNP}){
+							if(exists $hash_var{$tname}{$tpos}{SNP}{ALT}{$qbase}){
+								my @tmp = throw_item_from_array($qname,@{$hash_var{$tname}{$tpos}{SNP}{ALT}{$qbase}{query}});
+								if(@tmp == 0){
+									# if the query is the only one sample to introduce the variant, delete the variant when removing WBE
+									delete($hash_var{$tname}{$tpos}{SNP}{ALT}{$qbase});
+									delete($hash_query{$qname}{var}{$tname}{$tpos}{SNP});
+								}else{
+									@{$hash_var{$tname}{$tpos}{SNP}{ALT}{$qbase}{query}} = @tmp;
+								}
+							}
+						}
+					}
+					# adjust the end of the block 
+					$hash_query{$qname}{block}{$tbs[$count]+1}--;
 					
 					# change the border of the next gap
 					if($count < $blknum - 1){
 						my $nextgapstart = $tbs[$count] + $blks[$count] + 1;
 						my $nextgapend = $tbs[$count+1];
 						
-						delete($hash_query{$qname}{covre}{$nextgapstart});
+						delete($hash_query{$qname}{gap}{$nextgapstart});
 						
 						# change the block size
 						$blks[$count]--;
 						
 						$nextgapstart = $tbs[$count] + $blks[$count] + 1;
-						$hash_query{$qname}{covre}{$nextgapstart} = $nextgapstart;
+						$hash_query{$qname}{gap}{$nextgapstart} = $nextgapend;
 					}else{
 						# change the block size
 						$blks[$count]--;
@@ -223,7 +286,7 @@ while(<PSL>){
 			}
 
 			if($throwgap == 1){
-				delete($hash_query{$qname}{covre}{$tgapstart});
+				delete($hash_query{$qname}{gap}{$tgapstart});
 				goto THROW2;
 			}
 			
@@ -259,27 +322,48 @@ print "Done!\n";
 my %hash_cov;
 my %hash_blk;
 my %hash_gap;
+my %hash_covre;
 
 # collect covered regions of targets by queries
 foreach my $qname(sort keys %hash_query){
 	my $tname = $hash_query{$qname}{target};
-	foreach my $tstart(sort {$a <=> $b} keys %{$hash_query{$qname}{covab}}){
-		my $tend = $hash_query{$qname}{covab}{$tstart};
+	foreach my $tstart(sort {$a <=> $b} keys %{$hash_query{$qname}{block}}){
+		my $tend = $hash_query{$qname}{block}{$tstart};
 		push @{$hash_blk{$tname}{$tstart}{$tend}{query}}, $qname;
-		if(exists $hash_cov{$tname}{covab}{$tstart}){
-			next unless($hash_cov{$tname}{covab}{$tstart} < $tend);
+		if(exists $hash_cov{$tname}{block}{$tstart}){
+			if($hash_cov{$tname}{block}{$tstart} < $tend){
+				$hash_cov{$tname}{block}{$tstart} = $tend;
+			}
+		}else{
+			$hash_cov{$tname}{block}{$tstart} = $tend;
 		}
-		$hash_cov{$tname}{covab}{$tstart} = $tend;
+		# put the blocks into relatively covered region
+		if(exists $hash_covre{$tname}{$tstart}){
+			if($hash_covre{$tname}{$tstart} < $tend){
+				$hash_covre{$tname}{$tstart} = $tend;
+			}
+		}else{
+			$hash_covre{$tname}{$tstart} = $tend;
+		}
 	}
-	foreach my $tstart(sort {$a <=> $b} keys %{$hash_query{$qname}{covre}}){
-		my $tend = $hash_query{$qname}{covre}{$tstart};
-		unless(exists $hash_query{$qname}{covab}{$tstart}){
-			push @{$hash_gap{$tname}{$tstart}{$tend}{query}}, $qname;
+	foreach my $tstart(sort {$a <=> $b} keys %{$hash_query{$qname}{gap}}){
+		my $tend = $hash_query{$qname}{gap}{$tstart};
+		push @{$hash_gap{$tname}{$tstart}{$tend}{query}}, $qname;
+		if(exists $hash_cov{$tname}{gap}{$tstart}){
+			if($hash_cov{$tname}{gap}{$tstart} < $tend){
+				$hash_cov{$tname}{gap}{$tstart} = $tend;
+			}
+		}else{
+			$hash_cov{$tname}{gap}{$tstart} = $tend;
 		}
-		if(exists $hash_cov{$tname}{covre}{$tstart}){
-			next unless($hash_cov{$tname}{covre}{$tstart} < $tend);
+		# put the gaps into relatively covered region
+		if(exists $hash_covre{$tname}{$tstart}){
+			if($hash_covre{$tname}{$tstart} < $tend){
+				$hash_covre{$tname}{$tstart} = $tend;
+			}
+		}else{
+			$hash_covre{$tname}{$tstart} = $tend;
 		}
-		$hash_cov{$tname}{covre}{$tstart} = $tend;
 	}
 }
 
@@ -287,22 +371,22 @@ foreach my $qname(sort keys %hash_query){
 foreach my $tname(sort keys %hash_cov){
 
 	# merge absolutely covered region
-	my @starts = sort {$a <=> $b} keys %{$hash_cov{$tname}{covab}};
+	my @starts = sort {$a <=> $b} keys %{$hash_cov{$tname}{block}};
 	for(my $i = 0; $i < @starts; $i++){
 		my $start = $starts[$i];
-		my $end = $hash_cov{$tname}{covab}{$start};
+		my $end = $hash_cov{$tname}{block}{$start};
 		for(my $j = $i+1; $j < @starts; $j++){
 			my $start_ = $starts[$j];
-			my $end_ = $hash_cov{$tname}{covab}{$start_};
+			my $end_ = $hash_cov{$tname}{block}{$start_};
 			if($start_ <= $end + 1 and $end_ > $end){
 				$end = $end_;
-				$hash_cov{$tname}{covab}{$start} = $end;
-				delete($hash_cov{$tname}{covab}{$start_});
+				$hash_cov{$tname}{block}{$start} = $end;
+				delete($hash_cov{$tname}{block}{$start_});
 				splice(@starts, $j, 1);
 				$j--;
 				next;
 			}elsif($start_ <= $end + 1 and $end_ <= $end){
-				delete($hash_cov{$tname}{covab}{$start_});
+				delete($hash_cov{$tname}{block}{$start_});
 				splice(@starts, $j, 1);
 				$j--;
 				next;
@@ -315,22 +399,23 @@ foreach my $tname(sort keys %hash_cov){
 	}
 	
 	# merge relatively covered region
-	@starts = sort {$a <=> $b} keys %{$hash_cov{$tname}{covre}};
+	# relatively covered region contains blocks and gaps
+	@starts = sort {$a <=> $b} keys %{$hash_covre{$tname}};
 	for(my $i = 0; $i < @starts; $i++){
 		my $start = $starts[$i];
-		my $end = $hash_cov{$tname}{covre}{$start};
+		my $end = $hash_covre{$tname}{$start};
 		for(my $j = $i+1; $j < @starts; $j++){
 			my $start_ = $starts[$j];
-			my $end_ = $hash_cov{$tname}{covre}{$start_};
+			my $end_ = $hash_covre{$tname}{$start_};
 			if($start_ <= $end + 1 and $end_ > $end){
 				$end = $end_;
-				$hash_cov{$tname}{covre}{$start} = $end;
-				delete($hash_cov{$tname}{covre}{$start_});
+				$hash_covre{$tname}{$start} = $end;
+				delete($hash_covre{$tname}{$start_});
 				splice(@starts, $j, 1);
 				$j--;
 				next;
 			}elsif($start_ <= $end + 1 and $end_ <= $end){
-				delete($hash_cov{$tname}{covre}{$start_});
+				delete($hash_covre{$tname}{$start_});
 				splice(@starts, $j, 1);
 				$j--;
 				next;
@@ -350,14 +435,14 @@ open(RCOV,">$outname.covre");
 print RCOV "#CHROM\tSTART\tEND\n";
 
 foreach my $tname (keys %hash_cov){
-	my @starts = sort {$a <=> $b} keys %{$hash_cov{$tname}{covab}};
+	my @starts = sort {$a <=> $b} keys %{$hash_cov{$tname}{block}};
 	foreach my $start(@starts){
-		my $end = $hash_cov{$tname}{covab}{$start};
+		my $end = $hash_cov{$tname}{block}{$start};
 		print COV "$tname\t$start\t$end\n";
 	}
-	@starts = sort {$a <=> $b} keys %{$hash_cov{$tname}{covre}};
+	@starts = sort {$a <=> $b} keys %{$hash_covre{$tname}};
 	foreach my $start(@starts){
-		my $end = $hash_cov{$tname}{covre}{$start};
+		my $end = $hash_covre{$tname}{$start};
 		print RCOV "$tname\t$start\t$end\n";
 	}
 }
@@ -556,4 +641,15 @@ sub check_array{
 		$check = 1;
 	}
 	return($check);
+}
+
+sub throw_item_from_array{
+	my($query,@targets) = @_;
+	for(my $i = 0; $i < @targets; $i++){
+		if($targets[$i] eq $query){
+			splice(@targets,$i,1);
+			$i--;
+		}
+	}
+	return(@targets);
 }
