@@ -6,7 +6,7 @@
 #	
 #	By Zhuo CHEN, IGDB, CAS
 #	zhuochen@genetics.ac.cn
-#	zhuochenbioinfo@gamil.com
+#	chenomics@163.com
 #	
 #########################################################
 
